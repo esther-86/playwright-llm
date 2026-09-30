@@ -58,21 +58,15 @@ export interface LLMProvider {
 }
 
 class LLMRequestRateLimiter {
-  private static readonly maxCalls = 5;
-  private static readonly windowMs = 60_000;
-  private static callTimestamps: number[] = [];
+  private static readonly intervalMs = 20_000;
+  private static nextSlotAt = 0;
 
   static async waitForSlot(): Promise<void> {
-    while (true) {
-      const now = Date.now();
-      this.callTimestamps = this.callTimestamps.filter((timestamp) => now - timestamp < this.windowMs);
-      if (this.callTimestamps.length < this.maxCalls) {
-        this.callTimestamps.push(now);
-        return;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, this.windowMs - (now - this.callTimestamps[0])));
-    }
+    const now = Date.now();
+    const slotAt = Math.max(now, this.nextSlotAt);
+    this.nextSlotAt = slotAt + this.intervalMs;
+    const waitMs = slotAt - now;
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
 }
 

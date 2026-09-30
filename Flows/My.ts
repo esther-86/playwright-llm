@@ -1,5 +1,6 @@
 import { Page, BrowserContext } from '@playwright/test';
 import Constants from '../Helpers/Constants';
+import { TestData } from '../Helpers/TestData';
 import { CommonFlows } from './CommonFlows';
 import { ChatOptions, ChatResult, LLMFlows, MCPServerHandle, MCPServerOptions, RunPromptOptions } from './LLMFlows';
 
@@ -7,6 +8,7 @@ export class MyFacade {
   public page!: Page;
   public context!: BrowserContext;
   public readonly Constants = Constants;
+  public readonly TestData = new TestData();
   public TestInfo?: any;
 
   public CommonFlows!: CommonFlows;

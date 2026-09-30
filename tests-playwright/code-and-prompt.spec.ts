@@ -31,10 +31,8 @@ test.describe('Test Case 1: Register User', () => {
     test(`Test Case 1: Register User. ${JSON.stringify(current)}`,
       async ({ MyLLM }) => {
         
-        test.setTimeout(5 * 60 * 1000);
-        const name = 'Test User';
-        const email = `test.${Date.now()}@example.com`;
-        const password = 'Password123!';
+        test.setTimeout(10 * 60 * 1000);
+        const user = MyLLM.TestData.registrationUser();
 
         // 1. Launch browser
         // 2. Navigate to url http://automationexercise.com
@@ -50,7 +48,7 @@ test.describe('Test Case 1: Register User', () => {
         await MyLLM.LLM.runPrompt("Verify that 'New User Signup!' is visible.");
 
         // 6. Enter name and email address
-        await MyLLM.LLM.runPrompt(`Enter name '${name}' and email '${email}' in the signup form.`);
+        await MyLLM.LLM.runPrompt(`Enter name '${user.name}' and email '${user.email}' in the signup form.`);
 
         // 7. Click 'Signup' button
         await MyLLM.LLM.runPrompt("Click the 'Signup' button.");
@@ -59,7 +57,7 @@ test.describe('Test Case 1: Register User', () => {
         await MyLLM.LLM.runPrompt("Verify that 'ENTER ACCOUNT INFORMATION' is visible.");
 
         // 9. Fill details: Title, Name, Email, Password, Date of birth
-        await MyLLM.LLM.runPrompt(`Fill in the account details: title, name '${name}', email '${email}', password '${password}', and date of birth.`);
+        await MyLLM.LLM.runPrompt(`Fill in the account details: title, name '${user.name}', email '${user.email}', password '${user.password}', and date of birth.`);
 
         // 10. Select checkbox 'Sign up for our newsletter!'
         await MyLLM.LLM.runPrompt("Select the checkbox for 'Sign up for our newsletter!'.");
