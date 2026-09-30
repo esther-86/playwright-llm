@@ -1,6 +1,7 @@
 import { Page } from '@playwright/test';
 import { CommonFlows } from "./CommonFlows";
 import { ChildProcess, spawn, exec } from 'child_process';
+import fs from 'fs/promises';
 import path from 'path';
 
 import { MCPClient } from "../Helpers/MCPClient";
@@ -12,6 +13,7 @@ export interface ChatMessage {
   name?: string;
   tool_calls?: any[];
   tool_call_id?: string;
+  geminiParts?: any[];
 }
 
 export interface ChatOptions {
@@ -55,6 +57,25 @@ export interface LLMProvider {
   call(options: ChatOptions): Promise<ChatResult>;
 }
 
+class LLMRequestRateLimiter {
+  private static readonly maxCalls = 5;
+  private static readonly windowMs = 60_000;
+  private static callTimestamps: number[] = [];
+
+  static async waitForSlot(): Promise<void> {
+    while (true) {
+      const now = Date.now();
+      this.callTimestamps = this.callTimestamps.filter((timestamp) => now - timestamp < this.windowMs);
+      if (this.callTimestamps.length < this.maxCalls) {
+        this.callTimestamps.push(now);
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, this.windowMs - (now - this.callTimestamps[0])));
+    }
+  }
+}
+
 export class OpenAIProvider implements LLMProvider {
   async call(options: ChatOptions): Promise<ChatResult> {
     const apiKey = process.env.OPENAI_API_KEY || '';
@@ -81,6 +102,53 @@ export class OpenAIProvider implements LLMProvider {
     if (!response.ok) {
       const errorBody = await response.text();
       throw new Error(`LLM call to openai (${model}) failed [${response.status}]: ${errorBody}`);
+    }
+
+    const data: any = await response.json();
+    const choice = data.choices?.[0];
+    const assistantMsg = choice?.message || { role: 'assistant', content: '' };
+
+    const toolCalls = (assistantMsg.tool_calls || []).map((tc: any) => ({
+      id: tc.id,
+      name: tc.function.name,
+      args: tc.function.arguments ? (typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments) : {},
+    }));
+
+    return {
+      message: assistantMsg,
+      content: assistantMsg.content || '',
+      toolCalls,
+    };
+  }
+}
+
+export class JevProvider implements LLMProvider {
+  async call(options: ChatOptions): Promise<ChatResult> {
+    const apiKey = process.env.JEV_API_KEY || '';
+    if (!apiKey) {
+      throw new Error('JEV_API_KEY is not set in environment');
+    }
+
+    const baseUrl = (process.env.JEV_BASE_URL || 'https://ai-gateway.vercel.sh/v1').replace(/\/$/, '');
+    const url = `${baseUrl}/chat/completions`;
+    const model = options.model || process.env.JEV_MODEL || 'openai/gpt-5.5';
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: options.messages,
+        tools: options.tools && options.tools.length > 0 ? options.tools : undefined,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`LLM call to Jev (${model}) failed [${response.status}]: ${errorBody}`);
     }
 
     const data: any = await response.json();
@@ -130,7 +198,8 @@ export class GeminiProvider implements LLMProvider {
       throw new Error('GEMINI_API_KEY or GOOGLE_GENAI_API_KEY is not set in environment');
     }
     const model = options.model || process.env.GEMINI_MODEL || 'gemini-flash-latest';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const baseUrl = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
+    const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`;
 
     const systemMsg = options.messages.find((m) => m.role === 'system');
     const systemInstruction = systemMsg?.content ? { parts: [{ text: systemMsg.content }] } : undefined;
@@ -142,6 +211,9 @@ export class GeminiProvider implements LLMProvider {
           return { role: 'user', parts: [{ text: m.content || '' }] };
         }
         if (m.role === 'assistant') {
+          if (m.geminiParts) {
+            return { role: 'model', parts: m.geminiParts };
+          }
           const parts: any[] = [];
           if (m.content) parts.push({ text: m.content });
           if (m.tool_calls) {
@@ -240,6 +312,7 @@ export class GeminiProvider implements LLMProvider {
       role: 'assistant',
       content,
       tool_calls: openAiToolCalls.length > 0 ? openAiToolCalls : undefined,
+      geminiParts: parts,
     };
 
     return {
@@ -254,6 +327,7 @@ export class LLMProviderFactory {
   private static providers: Record<string, () => LLMProvider> = {
     openai: () => new OpenAIProvider(),
     gemini: () => new GeminiProvider(),
+    jev: () => new JevProvider(),
   };
 
   static register(name: string, factory: () => LLMProvider): void {
@@ -264,14 +338,20 @@ export class LLMProviderFactory {
     const key = (
       name ||
       process.env.LLM_PROVIDER ||
-      ((process.env.GEMINI_API_KEY || process.env.GOOGLE_GENAI_API_KEY) && !process.env.OPENAI_API_KEY ? 'gemini' : 'openai')
+      'jev'
     ).toLowerCase();
 
     const factory = LLMProviderFactory.providers[key];
     if (!factory) {
       throw new Error(`Unsupported LLM provider: "${key}". Available providers: ${Object.keys(LLMProviderFactory.providers).join(', ')}`);
     }
-    return factory();
+    const provider = factory();
+    return {
+      call: async (options) => {
+        await LLMRequestRateLimiter.waitForSlot();
+        return provider.call(options);
+      },
+    };
   }
 }
 
@@ -457,6 +537,25 @@ class LLMFlows extends CommonFlows {
     return '';
   }
 
+  private static isReadOnlyBrowserTool(name: string): boolean {
+    return new Set([
+      'browser_snapshot',
+      'browser_find',
+      'browser_console_messages',
+      'browser_network_requests',
+      'browser_screenshot',
+      'browser_take_screenshot',
+    ]).has(name);
+  }
+
+  private static getBrowserActionSignature(name: string, args: Record<string, any>): string | undefined {
+    if (!name.startsWith('browser_') || LLMFlows.isReadOnlyBrowserTool(name)) return undefined;
+
+    const subject = args.element ?? args.target ?? args.selector ?? args.url ?? args;
+    const value = args.text ?? args.value ?? args.url ?? '';
+    return `${name}:${JSON.stringify(subject)}:${JSON.stringify(value)}`;
+  }
+
   static async runPrompt(input: string, options: RunPromptOptions = {}): Promise<any> {
     const mcpPort = options.mcpPort ?? 8931;
     const mcp = new MCPClient(`http://localhost:${mcpPort}`);
@@ -481,6 +580,7 @@ class LLMFlows extends CommonFlows {
 - Use the visible interactive elements to select the best targets.
 - Execute actions step-by-step using the provided tools (e.g. browser_click, browser_type, browser_navigate).
 - You can call browser_snapshot at any turn to inspect updated DOM elements.
+- After an action succeeds, do not repeat it; use its result to decide the next step. Avoid redundant snapshots and clicks.
 - When the goal has been successfully accomplished, end your response with: "Passed Browser Agent Action".
 - If you cannot complete the goal, end your response with: "Failed Browser Agent Action".`;
 
@@ -500,6 +600,7 @@ class LLMFlows extends CommonFlows {
       const maxTurns = options.maxTurns || (process.env.AGENT_MAX_TURNS ? parseInt(process.env.AGENT_MAX_TURNS, 10) : 25);
       let turns = 0;
       let finalMessage = '';
+      const completedBrowserActions = new Set<string>();
 
       while (turns++ < maxTurns) {
         const result = await LLMFlows.callLLM({
@@ -520,11 +621,27 @@ class LLMFlows extends CommonFlows {
         }
 
         for (const toolCall of result.toolCalls) {
-          console.log(`Executing MCP tool ${toolCall.name}:`, toolCall.args);
-
           let toolResult: any;
           try {
-            toolResult = await mcp.callTool(toolCall.name, toolCall.args);
+            const toolArgs = { ...toolCall.args };
+            const actionSignature = LLMFlows.getBrowserActionSignature(toolCall.name, toolArgs);
+            if (actionSignature && completedBrowserActions.has(actionSignature)) {
+              console.warn(`Suppressing repeated MCP action ${toolCall.name}:`, toolArgs);
+              toolResult = { error: 'This browser action already succeeded during this task. Do not repeat it; inspect the current page or continue with the next step.' };
+            } else {
+              console.log(`Executing MCP tool ${toolCall.name}:`, toolCall.args);
+              if (typeof toolArgs.filename === 'string' && toolArgs.filename.trim()) {
+                await fs.mkdir(path.resolve('test-results'), { recursive: true });
+                toolArgs.filename = path.join('test-results', path.basename(toolArgs.filename));
+              }
+              toolResult = await mcp.callTool(toolCall.name, toolArgs);
+              if (actionSignature && !toolResult?.isError) {
+                completedBrowserActions.add(actionSignature);
+              }
+              if (options.page && toolCall.name.startsWith('browser_') && !LLMFlows.isReadOnlyBrowserTool(toolCall.name)) {
+                await options.page.waitForLoadState('load', { timeout: options.maxWaitPerAction ?? 30_000 });
+              }
+            }
           } catch (err: any) {
             toolResult = { error: err.message };
           }

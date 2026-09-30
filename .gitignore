@@ -9,3 +9,4 @@ test-html/
 /.playwright-profile/
 /logs/
 /.playwright-mcp/
+.DS_Store

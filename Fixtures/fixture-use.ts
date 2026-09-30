@@ -1,5 +1,6 @@
 /* eslint-disable no-empty-pattern */
 /* eslint-disable lines-around-comment */
+import fs from 'fs/promises';
 import { test as base, Page, BrowserContext, PlaywrightTestArgs } from '@playwright/test';
 import { attachToBrowser, launchBrowser } from "./fixture-helpers";
 import My, { MyFacade, MyLLMFacade } from "../Flows/My";
@@ -71,11 +72,63 @@ export const test = base.extend<MyFixtures>({
     thisTest.playwright = playwright;
     facade.TestInfo = thisTest;
 
+    const tracePath = testInfo.outputPath('myllm-trace.zip');
+    const networkPath = testInfo.outputPath('myllm-network.json');
+    const networkEvents: Array<Record<string, any>> = [];
+    let tracingStarted = false;
+
+    try {
+      await context.tracing.start({
+        screenshots: true,
+        snapshots: true,
+        sources: true,
+      });
+      tracingStarted = true;
+    } catch (error) {
+      if (!/already started/i.test(String(error))) {
+        throw error;
+      }
+    }
+
+    page.on('request', (request) => {
+      networkEvents.push({
+        type: 'request',
+        method: request.method(),
+        url: request.url(),
+        headers: request.headers(),
+        timestamp: Date.now(),
+      });
+    });
+
+    page.on('response', async (response) => {
+      networkEvents.push({
+        type: 'response',
+        status: response.status(),
+        url: response.url(),
+        headers: response.headers(),
+        timestamp: Date.now(),
+      });
+    });
+
     let mcpServer;
     try {
       mcpServer = await facade.LLM.launchMCP({ cdpPort, mcpPort });
       await use(facade);
     } finally {
+      if (tracingStarted) {
+        try {
+          await context.tracing.stop({ path: tracePath });
+        } catch {
+          // Ignore trace stop failures when the context is already closing.
+        }
+      }
+
+      try {
+        await fs.writeFile(networkPath, JSON.stringify(networkEvents, null, 2));
+      } catch {
+        // Ignore network log write failures if the test output directory is unavailable.
+      }
+
       await mcpServer?.stop();
       await context.close();
       await browser.close();

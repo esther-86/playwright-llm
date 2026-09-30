@@ -5,17 +5,18 @@
             "type": "node",
             "request": "launch",
             "name": "Debug Playwright Tests",
+            "runtimeExecutable": "/Users/esther/.nvm/versions/node/v24.21.0/bin/node",
             "program": "${workspaceFolder}/node_modules/@playwright/test/cli.js",
             "args": [
                 "test",
                 "-g",
-                "Code and Prompt(?!\\d)",
+                "Test Case 1: Register User(?!\\d)",
                 "--headed",
                 "--workers",
                 "1"
             ],
             "console": "integratedTerminal",
             "internalConsoleOptions": "neverOpen"
-        },
+        }
     ]
 }
